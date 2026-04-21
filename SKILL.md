@@ -39,7 +39,7 @@ Use this skill when the user is asking to **share** existing HTML with someone. 
 
 sniplet.page enforces a strict Content Security Policy on all served HTML to prevent platform abuse. The HTML you generate **must be self-contained**:
 
-- **External JS libraries** — only from `cdn.jsdelivr.net`, `cdnjs.cloudflare.com`, or `unpkg.com`. These cover Chart.js, Three.js, D3, Plotly, Tailwind, React/Vue CDN, and most common libs. Do not reference other CDNs.
+- **External JS libraries** — allowed from `cdnjs.cloudflare.com` and `cdn.tailwindcss.com` only. cdnjs is human-reviewed before accepting packages. `cdn.tailwindcss.com` is Tailwind's official Play CDN (the only supported host for runtime Tailwind v3+ JIT); use it via `<script src="https://cdn.tailwindcss.com"></script>` when you need utility-class styling. jsdelivr / unpkg auto-mirror npm and are not allowed. Most common libs are on cdnjs — Chart.js, D3, Three.js, React/Vue, Lodash, etc. If a library isn't on cdnjs or on the Tailwind Play CDN, inline it or pick an alternative. Do not reference other CDNs.
 - **Data** — must be embedded inline as JS variables. `fetch()` to external APIs is blocked.
 - **Images / fonts / media** — must be embedded as base64 data URIs. External URLs are blocked.
 - **No iframes** — cannot embed YouTube, Google Maps, or other external content.
@@ -220,3 +220,19 @@ Agent: Produces HTML artifact. Does NOT call sniplet API. The user didn't ask to
 User (later): Great, can you share this with my co-founder alex@startup.com?
 
 **Now** the skill triggers. Agent calls the API with the previously generated HTML, slug `saas-landing-draft`, viewers `["alex@startup.com"]`.
+
+## Where to learn more
+
+- **Security policy**: https://sniplet.page/security
+- **Vulnerability disclosure**: https://sniplet.page/.well-known/security.txt
+- **Service advisories** (incidents / known issues): https://sniplet.page/security#advisories
+
+This file (`SKILL.md`) is the canonical source of truth for the sniplet API contract. To re-fetch the latest version:
+
+```bash
+curl -O https://sniplet.page/SKILL.md
+# or
+curl https://sniplet.page/ -o SKILL.md
+```
+
+Both URLs return the same content with `Content-Type: text/plain; charset=utf-8` and `Content-Disposition: inline; filename="SKILL.md"`.

@@ -8,7 +8,7 @@
 
 **對象**:sniplet.page operator(目前為 XP,團隊擴大時延伸)。
 
-**範圍**:v0.8.12。架構變動時同步更新。
+**範圍**:v0.8.14。架構變動時同步更新。
 
 ---
 
@@ -16,7 +16,7 @@
 
 | Env var | 用途 | 洩漏後果 | 輪換複雜度 |
 |---|---|---|---|
-| `SESSION_JWT_SECRET` | 簽 session cookie JWT(30 天) | 攻擊者可偽造 session cookie → 冒充任何 viewer | 中(所有 session 失效) |
+| `SESSION_JWT_SECRET` | 簽 session cookie JWT(7 天,v0.8.13 從 30 天縮,與 sniplet TTL 對齊) | 攻擊者可偽造 session cookie → 冒充任何 viewer | 中(所有 session 失效) |
 | `MAGIC_JWT_SECRET` | 簽 magic link JWT(15 分鐘) | 攻擊者可偽造 magic link → 在 15 分鐘內奪取任何 viewer session | 低(影響範圍短) |
 | `EMAIL_HASH_SECRET` | Email 的 HMAC salt;用於 `EMAIL_INDEX_KV` key、`meta.viewers[].h`、JWT `sub`(v0.8.11 F-11) | 拿到 KV / R2 / cookie dump 的攻擊者可透過 rainbow attack 還原 viewer email | 高(dual-compute migration;涉及 index + R2 + sessions 三處,見 §2.4) |
 | `IP_HASH_SECRET` | IP hashing 的 HMAC salt | 拿到 KV/R2 dump 的攻擊者可還原 creator IP | 高(既有 hashes 無法輪換,接受 abuse trace 斷鏈) |
@@ -50,7 +50,7 @@ openssl rand -base64 32
 4. 監控 `auth_verified` event rate — 預期會有一波新的 magic link 申請
 5. 事後:檢查輪換前一週的 log,看是否有偽造 session 使用跡象
 
-**Graceful 變體(低緊迫性輪換)**:Bump JWT payload `v: 1 → v: 2`。Deploy 同時接受 `SESSION_JWT_SECRET_V1` 與 `SESSION_JWT_SECRET_V2` 的版本。30 天後移除 V1。(需要 code 支援 multi-secret verification — v1 MVP 尚未實作)
+**Graceful 變體(低緊迫性輪換)**:Bump JWT payload `v: 1 → v: 2`。Deploy 同時接受 `SESSION_JWT_SECRET_V1` 與 `SESSION_JWT_SECRET_V2` 的版本。7 天後(對齊 session TTL)移除 V1。(需要 code 支援 multi-secret verification — v1 MVP 尚未實作)
 
 ### 2.3 `MAGIC_JWT_SECRET` 輪換
 
@@ -165,7 +165,7 @@ openssl rand -base64 32
 3. **Notify**(72 小時內,依 GDPR Art 33):
    - 主管機關:對應的 data protection authority(如台灣 PDPA;若有 EU 使用者則 EU DPA)
    - 使用者:若可識別 email 則 email 通知受影響的 viewer / creator
-   - 公開:更新 GitHub repo `README.md` 的 "Known Issues / Advisories" 段落、更新 `sniplet.page/security` page 的 advisory log 段落(operator 手動 edit Worker assets)
+   - 公開:更新 `sniplet.page/security#advisories` 段落(operator 手動 edit Worker assets;v0.8.13 起為唯一公開 channel,GitHub repo 為 private)
 4. **Remediate**:
    - 修正 root cause
    - 加 regression test
@@ -180,7 +180,7 @@ openssl rand -base64 32
 2. 檢查元件狀態(Cloudflare、Resend、Turnstile status page)
 3. 若是第三方:等待或切換(若有 fallback — Resend 目前無 fallback,接受單點)
 4. 若是內部:rollback 或 hotfix
-5. 超過 15 分鐘則透過 **GitHub repo `README.md` Known Issues 段落** 對外溝通(status page 列 v2 roadmap,v1 不做)
+5. 超過 15 分鐘則透過 **`sniplet.page/security#advisories` 段落**對外溝通(v0.8.13 從 GitHub README 改;status page 列 v2 roadmap,v1 不做)
 
 ### 3.4 SEV-3 劇本:個別 viewer 回報 session cookie 外洩(v0.8.11 F-29)
 
@@ -193,14 +193,14 @@ openssl rand -base64 32
 1. **確認嚴重度**:問 Alice 是否為單純 cookie 疑慮,還是懷疑更廣泛的身份外洩(若後者,升 SEV-2,並考慮走 §2.2 `SESSION_JWT_SECRET` 輪換 nuclear 選項)
 2. **指引 Alice 自助**:
    - 在**當前裝置**的 browser 打 `POST sniplet.page/auth/logout`(或清 cookies)只會清她手上的 cookie,**不影響** 被偷裝置上的 cookie
-   - 告知 v1 無 per-user revocation:被偷的 cookie 最多 valid 30 天,到期自然失效
+   - 告知 v1 無 per-user revocation:被偷的 cookie 最多 valid 7 天(v0.8.13 從 30 天縮,與 sniplet TTL 對齊),到期自然失效
    - 告知攻擊者能看的範圍(僅 Alice 白名單內的私享 sniplet,read-only),幫助評估真實傷害
 3. **決定 operator 側動作**:
    - 若 Alice 白名單內的 sniplet 含**高敏感內容**(公司內部資料、法律文件等),**建議**(但不強制)creator PATCH 暫時把 Alice 從 viewers 移除,或 DELETE 該 sniplet;無須走 nuclear 輪換
    - 若擔心同批攻擊影響多個 viewer(例如公司整批裝置被 compromise),考慮 §2.2 `SESSION_JWT_SECRET` 輪換(全體登出,合法 viewer 需重新收 magic link)
 4. **記錄**:純文字 log 檔紀錄:回報時間、Alice 受影響裝置描述(不記 cookie 內容)、採取的動作、結果;保留 1 年
 
-**為何 v1 這樣設計**:per-user revocation(JWT revoke list)需要每次 GET 多一次 KV read,v1 為成本 / 複雜度 trade-off 不做。此 F-29 接受 30 天 cookie 外洩 window 為 LOW 嚴重度下的合理成本;v2 若客訴 / 實際事件顯示 LOW 評估不對,再做 revoke list。
+**為何 v1 這樣設計**:per-user revocation(JWT revoke list)需要每次 GET 多一次 KV read,v1 為成本 / 複雜度 trade-off 不做。此 F-29 接受 **7 天**(v0.8.13 從 30 天縮)cookie 外洩 window 為 LOW 嚴重度下的合理成本;v2 若客訴 / 實際事件顯示 LOW 評估不對,再做 revoke list。
 
 ---
 
@@ -264,7 +264,10 @@ openssl rand -base64 32
   sniplet.page. CAA 0 iodef "mailto:security@sniplet.page"
   ```
 - [ ] **CF Log Push 未啟用**,或若啟用則確認 `Authorization` header 在 drop list(避免 owner_token 入 log pipeline)
-- [ ] Resend 帳號 active,`sniplet.page` 寄件網域已驗證(DKIM + SPF)
+- [ ] Resend 帳號 active,`sniplet.page` 寄件網域已驗證(**DKIM + SPF + DMARC**,F-39 v0.8.14 加)
+  - DMARC DNS record:`_dmarc.sniplet.page TXT "v=DMARC1; p=reject; rua=mailto:security@sniplet.page; adkim=s; aspf=s"`
+  - `p=reject` 讓其他 MTA 拒收偽造 sniplet.page 的信(防 magic link phishing 互仿),`adkim=s` + `aspf=s` 嚴格 alignment
+  - 若剛啟用時擔心合法信被誤判,可先用 `p=quarantine` 觀察 `rua` 報表 7 天再升 `p=reject`
 - [ ] Cloudflare Turnstile site 已建立,site key + secret 已取得
 - [ ] 4 個 random secrets 透過 `openssl rand -base64 32` 產生並存入 Worker env:
   - [ ] `SESSION_JWT_SECRET`
@@ -283,7 +286,7 @@ openssl rand -base64 32
 - [ ] `RUNBOOK.md`(本檔)已 push 到 ops repo(不公開)
 - [ ] `/security` page(§10.7)live,內容 review 過
 - [ ] `/.well-known/security.txt`(§10.8)live,`Expires` 設為實際 ship 日起算 ≥ 1 年
-- [ ] `README.md` 有 "Known Issues / Advisories" 空段落(供 SEV 事件使用)
+- [ ] `/security` page 含 `#advisories` 空段落(SEV 事件公告唯一公開 channel;v0.8.13 起取代原 GitHub README 段落)
 - [ ] `security@sniplet.page` mailbox active 且有人監控
 
 ---
@@ -315,4 +318,4 @@ openssl rand -base64 32
 
 ---
 
-*最後更新:2026-04-21(v0.8.12)*
+*最後更新:2026-04-22(v0.8.14)*
