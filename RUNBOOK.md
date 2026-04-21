@@ -8,7 +8,7 @@
 
 **對象**:sniplet.page operator(目前為 XP,團隊擴大時延伸)。
 
-**範圍**:v0.8.10。架構變動時同步更新。
+**範圍**:v0.8.11。架構變動時同步更新。
 
 ---
 
@@ -18,7 +18,7 @@
 |---|---|---|---|
 | `SESSION_JWT_SECRET` | 簽 session cookie JWT(30 天) | 攻擊者可偽造 session cookie → 冒充任何 viewer | 中(所有 session 失效) |
 | `MAGIC_JWT_SECRET` | 簽 magic link JWT(15 分鐘) | 攻擊者可偽造 magic link → 在 15 分鐘內奪取任何 viewer session | 低(影響範圍短) |
-| `EMAIL_HASH_SECRET` | Email 索引 KV 的 HMAC salt | 拿到 KV dump 的攻擊者可透過 rainbow attack 還原 viewer email | 高(需 dual-write 期間 migration) |
+| `EMAIL_HASH_SECRET` | Email 的 HMAC salt;用於 `EMAIL_INDEX_KV` key、`meta.viewers[].h`、JWT `sub`(v0.8.11 F-11) | 拿到 KV / R2 / cookie dump 的攻擊者可透過 rainbow attack 還原 viewer email | 高(dual-compute migration;涉及 index + R2 + sessions 三處,見 §2.4) |
 | `IP_HASH_SECRET` | IP hashing 的 HMAC salt | 拿到 KV/R2 dump 的攻擊者可還原 creator IP | 高(既有 hashes 無法輪換,接受 abuse trace 斷鏈) |
 | `RESEND_API_KEY` | 透過 Resend 寄 magic link email | 攻擊者可以 sniplet.page 名義寄信;phishing 風險 | 低(Resend dashboard 輪換) |
 | `TURNSTILE_SECRET` | 驗證 Turnstile token | 攻擊者可偽造 captcha 通過 → 濫發 magic link 申請 | 低(CF dashboard 輪換) |
@@ -64,35 +64,48 @@ openssl rand -base64 32
 3. 立即 deploy(影響範圍小 — 最壞情況是使用者重新申請)
 4. 不需協調;15 分鐘自然過期完成輪換
 
-### 2.4 `EMAIL_HASH_SECRET` 輪換(dual-write migration)
+### 2.4 `EMAIL_HASH_SECRET` 輪換(v0.8.11 後影響面擴大)
 
-**何時**:懷疑 KV dump 外洩,或發現嚴重 cryptographic 問題。
+**何時**:懷疑 KV / R2 dump 外洩,或發現嚴重 cryptographic 問題。
 
-**影響**:若不走 dual-write,所有 `EMAIL_INDEX_KV` 條目失效 → 合法 viewer 的 `/auth/request` 會 miss index 並 silently skip(Strategy C)→ 收不到 magic link。
+**影響(v0.8.11 F-11 升 v1 後)**:
+- `EMAIL_INDEX_KV` 所有 entry 失效(key 變了)
+- `meta.viewers[].h` 失效(HMAC 變了)— 所有私享 sniplet 的白名單 HMAC 需 rebuild
+- **所有 session cookie 失效**:JWT `sub` 是舊 HMAC,輪換後對不上新 `meta.viewers[].h`,下次 GET 即回 challenge page
+- 合法 viewer 需重新走 magic link 取得新 session
 
-**步驟(dual-write migration,避免 downtime)**:
+**不走 dual-write 的嚴重性**:R2 中 viewer 白名單實質斷鏈,所有私享 sniplet 白名單變空 → 合法 viewer 永遠 miss;`/auth/request` 也 miss → 永遠收不到 magic link。**必須 dual-write 或 backfill**,否則等於全體私享功能停擺直到 sniplet 過期。
 
-1. 產生新 secret,暫存為 `EMAIL_HASH_SECRET_NEW`
-2. 部署 code 改動:
-   - 寫入路徑(POST / PATCH viewers):同時寫入 old_key 與 new_key
+**步驟(dual-write migration,avoid 全站 downtime)**:
+
+1. 產生新 secret,暫存為 `EMAIL_HASH_SECRET_NEW`(**不**取代舊值)
+2. 部署 code 改動(dual-compute):
+   - 寫入路徑(POST / PATCH viewers):同時用 old 與 new secret 計算 HMAC,`meta.viewers[]` 暫時變成 `{ h_old, h_new, m }`;`EMAIL_INDEX_KV` 同時寫兩個 key
    - 讀取路徑(`/auth/request`):先查 new_key,miss 則 fallback old_key
+   - 授權比對(GET 私享):session cookie `sub` 可能是 old 或 new;同時與 `h_old` 和 `h_new` 比對,任一命中即放行
+   - 簽 JWT(新發 session):用 new secret,`sub` = new HMAC
 3. 撰寫 migration script,對 R2 中每個 active sniplet:
    ```ts
-   //   讀取 meta.viewers(v0.8.10 為明文 email)
-   //   對每個 email 用新 secret 計算新 HMAC
-   //   用新 key 寫入 EMAIL_INDEX_KV
+   // 讀取 meta.viewers(含 h_old + m,注意:v0.8.11 起明文 email 已不存於 R2)
+   // 用新 secret 計算新 HMAC 填 h_new
+   // 寫回 meta.json
+   // 同時把對應 EMAIL_INDEX_KV entry 加 new key
    ```
-4. 監控 `auth_request_received` 的 `was_on_whitelist=true` rate 恢復到輪換前水準(24 小時內)
-5. 切換:`EMAIL_HASH_SECRET` 指向新 secret、拔掉 `EMAIL_HASH_SECRET_NEW` + dual-write code
-6. Deploy;舊 old_key 條目隨 TTL 7 天自然過期
+   **關鍵限制**:v0.8.11 後 `meta.viewers` 不再含明文 email — script 無法從 R2 還原明文。解法:這份 secret 本就有 deterministic 性質,從 `h_old` 再算不出 `h_new`(HMAC 單向)。因此 backfill **需要明文 email source**;可行來源:
+     - (a) PATCH / POST 時 creator 送明文 → 在 dual-compute window 內自然 catch up(不處理舊 sniplet)
+     - (b) 暫不處理既有 sniplet,等它們 7 天內自然過期;新 sniplet 才用新 secret
+     - **建議預設選 (b)**,唯一成本是「輪換前建立的私享 sniplet 在輪換期間無法 auth」,但新 sniplet 正常運作
+4. 監控 `auth_request_received` 的 `was_on_whitelist=true` rate;若選 (b),該 rate 會先降後恢復
+5. 7 天後(或 migration 完成後):切換 `EMAIL_HASH_SECRET` 指向新 secret、移除 `EMAIL_HASH_SECRET_NEW` 與 dual-compute code
+6. Deploy;舊 `h_old` 條目隨 sniplet TTL 7 天自然過期
 
 **若急迫(接受 downtime)**:
 1. 產生新 secret + 更新 env + deploy
-2. 跑 backfill script
-3. 期間 `/auth/request` miss 所有舊 sniplet(預期 5–30 分鐘,取決於 R2 scan 速度)
-4. 選擇低流量時段執行
+2. 不做 backfill;所有既有私享 sniplet 白名單斷鏈 7 天
+3. 合法 viewer 重新被 creator 用明文 PATCH add 進白名單(代價明顯)
+4. 選擇低流量時段執行,並事前 email 通知 creator
 
-**v2 改善**:若 `meta.viewers` 改為儲存 hashes(F-11 roadmap),此 migration 會變得更複雜,需要 email 明文短暫保留或走多階段 migration。
+**v2 評估**:若要避免 (b) 的斷鏈 7 天,v2 可評估:(i) 讓 creator 在 dashboard 重匯明文 viewer list;(ii) 用第二組獨立 secret `SUB_HASH_SECRET` 專給 JWT,使 `EMAIL_HASH_SECRET` 輪換只影響 index 不影響 sessions(解耦,但多一個 secret)。
 
 ### 2.5 `IP_HASH_SECRET` 輪換
 
@@ -152,7 +165,7 @@ openssl rand -base64 32
 3. **Notify**(72 小時內,依 GDPR Art 33):
    - 主管機關:對應的 data protection authority(如台灣 PDPA;若有 EU 使用者則 EU DPA)
    - 使用者:若可識別 email 則 email 通知受影響的 viewer / creator
-   - 公開:更新 GitHub repo `README.md` 的 "Known Issues / Advisories" 段落 與 `SECURITY.md` 的 advisory log
+   - 公開:更新 GitHub repo `README.md` 的 "Known Issues / Advisories" 段落、更新 `sniplet.page/security` page 的 advisory log 段落(operator 手動 edit Worker assets)
 4. **Remediate**:
    - 修正 root cause
    - 加 regression test
@@ -168,6 +181,26 @@ openssl rand -base64 32
 3. 若是第三方:等待或切換(若有 fallback — Resend 目前無 fallback,接受單點)
 4. 若是內部:rollback 或 hotfix
 5. 超過 15 分鐘則透過 **GitHub repo `README.md` Known Issues 段落** 對外溝通(status page 列 v2 roadmap,v1 不做)
+
+### 3.4 SEV-3 劇本:個別 viewer 回報 session cookie 外洩(v0.8.11 F-29)
+
+**情境**:Alice 透過 `security@sniplet.page` 回報,懷疑自己裝置 / 瀏覽器 cookie 被偷(laptop 失竊、malware、借人未登出、瀏覽器備份外流等)。
+
+**嚴重度評估**:LOW。攻擊者拿 Alice 的 cookie 能做的是瀏覽 Alice 白名單內的私享 sniplet(read-only);**無法** 新建 / 刪除 / PATCH 任何 sniplet(那些需要 `owner_token`,不在 cookie 裡)。
+
+**回覆 Alice 的流程**:
+
+1. **確認嚴重度**:問 Alice 是否為單純 cookie 疑慮,還是懷疑更廣泛的身份外洩(若後者,升 SEV-2,並考慮走 §2.2 `SESSION_JWT_SECRET` 輪換 nuclear 選項)
+2. **指引 Alice 自助**:
+   - 在**當前裝置**的 browser 打 `POST sniplet.page/auth/logout`(或清 cookies)只會清她手上的 cookie,**不影響** 被偷裝置上的 cookie
+   - 告知 v1 無 per-user revocation:被偷的 cookie 最多 valid 30 天,到期自然失效
+   - 告知攻擊者能看的範圍(僅 Alice 白名單內的私享 sniplet,read-only),幫助評估真實傷害
+3. **決定 operator 側動作**:
+   - 若 Alice 白名單內的 sniplet 含**高敏感內容**(公司內部資料、法律文件等),**建議**(但不強制)creator PATCH 暫時把 Alice 從 viewers 移除,或 DELETE 該 sniplet;無須走 nuclear 輪換
+   - 若擔心同批攻擊影響多個 viewer(例如公司整批裝置被 compromise),考慮 §2.2 `SESSION_JWT_SECRET` 輪換(全體登出,合法 viewer 需重新收 magic link)
+4. **記錄**:純文字 log 檔紀錄:回報時間、Alice 受影響裝置描述(不記 cookie 內容)、採取的動作、結果;保留 1 年
+
+**為何 v1 這樣設計**:per-user revocation(JWT revoke list)需要每次 GET 多一次 KV read,v1 為成本 / 複雜度 trade-off 不做。此 F-29 接受 30 天 cookie 外洩 window 為 LOW 嚴重度下的合理成本;v2 若客訴 / 實際事件顯示 LOW 評估不對,再做 revoke list。
 
 ---
 
@@ -195,12 +228,13 @@ openssl rand -base64 32
 
 ### 每月
 - **不做 scheduled secret 輪換**(輪換為 event-driven,不是時間驅動)
-- Review `SECURITY.md` 是否有收到新回報
+- Review `security@sniplet.page` inbox 是否有新回報(對照 `/security` page 的 disclosure timeline)
 - 檢查 cost dashboard 對照 PRD §15 scenarios
 
 ### 每季
 - 完整安全 self-audit:走一遍 PRD §11 的 checklist
 - Review `RUNBOOK.md` 是否過時;架構變動則更新
+- 檢查 `/.well-known/security.txt` 的 `Expires` 是否領先 ≥ 1 年,不足則更新並重新 deploy
 
 ---
 
@@ -245,7 +279,9 @@ openssl rand -base64 32
 - [ ] Analytics Engine dataset `ANALYTICS` 已建立
 - [ ] Cron Triggers 設定:`0 2 * * *`
 - [ ] Monitoring alerts(§4 上方)已設定
-- [ ] `SECURITY.md` 與 `RUNBOOK.md`(本檔)已 push 到 repo
+- [ ] `RUNBOOK.md`(本檔)已 push 到 ops repo(不公開)
+- [ ] `/security` page(§10.7)live,內容 review 過
+- [ ] `/.well-known/security.txt`(§10.8)live,`Expires` 設為實際 ship 日起算 ≥ 1 年
 - [ ] `README.md` 有 "Known Issues / Advisories" 空段落(供 SEV 事件使用)
 - [ ] `security@sniplet.page` mailbox active 且有人監控
 
@@ -278,4 +314,4 @@ openssl rand -base64 32
 
 ---
 
-*最後更新:2026-04-18(v0.8.10)*
+*最後更新:2026-04-21(v0.8.11)*

@@ -44,7 +44,8 @@ sniplet.page enforces a strict Content Security Policy on all served HTML to pre
 - **Images / fonts / media** — must be embedded as base64 data URIs. External URLs are blocked.
 - **No iframes** — cannot embed YouTube, Google Maps, or other external content.
 - **No form submission to external endpoints** — forms must handle input client-side.
-- **No `localStorage` / `indexedDB` assumptions** — storage is shared across sniplets on the same subdomain root; do not use for per-sniplet state that another sniplet should not see.
+- **`localStorage` / `indexedDB`** — available and isolated per-sniplet (each sniplet has its own origin under the subdomain architecture, so SOP keeps storage separate). Data is ephemeral: sniplets expire after 7 days.
+- **Escape user-supplied strings** — the CSP intentionally allows inline JS so AI-generated code can run. If your HTML embeds user-provided data (form echoes, URL parameters, user-quoted text), HTML-escape it before inserting into the DOM; otherwise viewers may execute JS that wasn't your intent. The platform's sandbox bounds damage (no external `fetch`, no cookie access, etc.) but cannot prevent in-page logic corruption.
 
 This keeps sniplets as self-contained snapshots, which is what the product is designed for. For dynamic apps with external API calls, use Vercel / Netlify instead.
 
@@ -122,9 +123,12 @@ Successful response:
   "url": "https://q3-sales-dashboard-a7k2.sniplet.page",
   "expires_at": "2026-04-25T14:30:00Z",
   "owner_token": "ot_...",
-  "access": "public"
+  "access": "public",
+  "viewers_masked": null
 }
 ```
+
+For email-gated sniplets, `viewers_masked` returns a masked form like `["a***@co.com", "b***@co.com"]` — the full email is never echoed back. Tell the user which emails you passed in; the platform only stores the HMAC + masked version.
 
 ### 4. Report to the user
 
