@@ -8,7 +8,7 @@
 
 **對象**:sniplet.page operator(目前為 XP,團隊擴大時延伸)。
 
-**範圍**:v0.8.11。架構變動時同步更新。
+**範圍**:v0.8.12。架構變動時同步更新。
 
 ---
 
@@ -215,6 +215,7 @@ openssl rand -base64 32
 | `daily_cap_hit` event | 單日 1000 sniplet cap 達到 | SEV-3 | 成長期正常;若突發 spike 則檢查濫用。考慮提升 cap |
 | `rate_limit_hit` 的 per-IP / per-email reason spike | 單 IP 或單 email 狂打 | SEV-3 | 檢查是合法 burst 還是攻擊。CF firewall rule 可直接 block |
 | `csp_violation` event rate > 100 / day | CSP 攔下 HTML 行為高 | SEV-3 | 檢查是新 CDN 要加清單 / legit 用例,還是 abuse 訊號 |
+| `auth_global_cap_hit` 當日首次觸發 | 全站 `/auth/request` Resend send cap 達到(F-32) | SEV-3 | 判斷:(a) 合法成長 → 升 Resend tier 並同步 bump Worker 中的 `AUTH_SEND_DAILY_CAP` 常數 deploy;(b) 攻擊 → CF firewall rule 暫擋可疑 IP / ASN,觀察流量回落再放行;當日已觸發 → 現有合法 viewer 收不到 magic link 直到 UTC 隔日 00:00 或 cap bump |
 
 ---
 
@@ -314,4 +315,4 @@ openssl rand -base64 32
 
 ---
 
-*最後更新:2026-04-21(v0.8.11)*
+*最後更新:2026-04-21(v0.8.12)*
