@@ -216,6 +216,9 @@ openssl rand -base64 32
 | `rate_limit_hit` 的 per-IP / per-email reason spike | 單 IP 或單 email 狂打 | SEV-3 | 檢查是合法 burst 還是攻擊。CF firewall rule 可直接 block |
 | `csp_violation` event rate > 100 / day | CSP 攔下 HTML 行為高 | SEV-3 | 檢查是新 CDN 要加清單 / legit 用例,還是 abuse 訊號 |
 | `auth_global_cap_hit` 當日首次觸發 | 全站 `/auth/request` Resend send cap 達到(F-32) | SEV-3 | 判斷:(a) 合法成長 → 升 Resend tier 並同步 bump Worker 中的 `AUTH_SEND_DAILY_CAP` 常數 deploy;(b) 攻擊 → CF firewall rule 暫擋可疑 IP / ASN,觀察流量回落再放行;當日已觸發 → 現有合法 viewer 收不到 magic link 直到 UTC 隔日 00:00 或 cap bump |
+| `sniplet_404_miss` 單 ip_hash > 200/hour(F-42,v0.8.15) | 可能 slug enumeration 攻擊 | SEV-3 | 分析該 ip_hash 的 query pattern(分散隨機 slug? 集中特定品牌 slug 前綴?);若為攻擊 → CF firewall rule 針對該 ASN / country 加掃描阻擋;合法 browser prefetch / 爬蟲 → 接受,觀察再決定是否 tune 閾值 |
+| `sniplet_mutated` 非預期 spike(F-41,v0.8.15) | owner_token 可能洩漏 + 攻擊者批量 PATCH / DELETE | SEV-2 | 緊急聯絡 creator(若可識別);審核近 24 小時 `sniplet_mutated` 的 slug_hash 清單;考慮全站 session 輪換(RUNBOOK §2.2)若懷疑 token 批量外洩 |
+| `csp_report_rate_limited` 單 ip_hash > 50/hour(F-40,v0.8.15) | CSP report endpoint 被 flood | SEV-3 | CF firewall rule 針對該 IP / ASN 短期 block;確認 Analytics Engine 用量未超配額 |
 
 ---
 
@@ -318,4 +321,61 @@ openssl rand -base64 32
 
 ---
 
-*最後更新:2026-04-22(v0.8.14)*
+## 9. Cloudflare account 與 Wrangler security(v0.8.15 新增,M-4)
+
+所有 sniplet.page 資料、secret、deploy 權限都掛在單一 Cloudflare account。**這個帳號被接管 = 全盤 compromise**,且 attacker 可直接 edit Worker code 讓所有防線失效。因此 CF account 的 hygiene 是最上游的安全邊界。
+
+### 9.1 Account 層 hardening
+
+- **強制 2FA**:必須用 hardware key(YubiKey / Titan)或 TOTP(Google Authenticator / 1Password);**不用 SMS**(SIM swap 攻擊)
+- **Recovery code 離線保存**:CF 產生的 recovery code 印出來放保險箱,或存密碼管理器獨立 vault(不與日常 password vault 同)
+- **Login email**:使用專屬 email(非 `xpsteven@gmail.com` 之類日常帳號)以降低 credential stuffing 機率;此 email 本身也需 2FA + 獨立密碼
+- **Admin session 定期登出**:CF Dashboard 登入後完成工作即登出,不留 idle session
+- **Login notification**:啟用 CF 的「新裝置登入提醒」email 通知
+
+### 9.2 API Token scope minimization
+
+部署與 ops 用的 `CF_API_TOKEN` **MUST** 遵循 least privilege:
+
+- **不要用 Global API Key**(等同完整帳號密碼)
+- 每個用途建一個**獨立 token**,各自限制 scope:
+
+| 用途 | 所需 permission | 建議 TTL |
+|---|---|---|
+| Worker deploy(wrangler CI) | Account: Workers Scripts:Edit + Account: Workers R2 Storage:Edit + Account: Workers KV Storage:Edit + Account: Account Analytics:Read | 90 天,週期性輪換 |
+| Read-only monitoring / 讀 Analytics | Account Analytics:Read + Workers Scripts:Read | 無期限(風險低) |
+| DNS 設定 | Zone:DNS:Edit(僅 sniplet.page zone) | 完成後刪除 |
+
+- **IP restrictions**:若有固定 IP 出口,限制 token 只能從該 IP 使用(CF token 支援 IP allowlist)
+- **Token 洩漏處置**:CF Dashboard → API Tokens → 立即 Delete;產新 token 存 `CF_API_TOKEN` 環境變數或 `.env`;`git log -p` 檢查是否誤 commit 過(若有,走 `git filter-repo` 或 rewrite 歷史)
+
+### 9.3 Wrangler 本機 hygiene
+
+- **不把 secret 寫進 `wrangler.toml`**:secrets 只用 `wrangler secret put <NAME>`,`wrangler.toml` 只放 `vars`(非敏感 env var)
+- **`.env` 或 `.dev.vars` MUST 在 `.gitignore`**:local dev secrets(`RESEND_API_KEY_DEV` 等)不得 commit
+- **`wrangler tail` 勿在 production 長期掛載**:會 stream 生產流量的 request header 到本機 terminal,若 terminal 歷史 log 被抓取 = 等於 edge log 外洩;debug 完即停止
+- **`wrangler dev` 的 remote mode**:會跑在 CF edge 且能看到真實 env secret,不要在公共 wifi / 共用電腦執行
+- **CI deployment**:用 GitHub Actions secret 存 `CF_API_TOKEN`;不要在 CI log 中 echo 此值;token 設 deploy-only scope
+
+### 9.4 Account 接管的偵測與復原
+
+**偵測訊號**:
+- 非預期時間的 CF login notification email(半夜、國外 IP 登入)
+- Cron trigger / Worker route 被修改(operator 自己沒動)
+- R2 / KV 有非預期刪除
+- Resend 帳號收到 API key 輪換通知(若 attacker 覆蓋)
+- Worker deploy 歷史出現未知 deployment(CF Dashboard → Workers → Deployments)
+
+**復原步驟**(一旦懷疑帳號被接管):
+1. **立即**:從可信裝置登入 CF → 強制所有 session 登出(Account → Audit Log → Revoke all active sessions)→ 改密碼 + 重設 2FA
+2. **全部 API token revoke**:即使沒被明顯用到,全部刪掉重發
+3. **檢查 Worker code diff**:`wrangler deployments list` 比對預期版本;若有 unauthorized deploy,rollback
+4. **輪換所有 secret**(走 §2 流程):`SESSION_JWT_SECRET`、`MAGIC_JWT_SECRET`、`EMAIL_HASH_SECRET`、`IP_HASH_SECRET`、`RESEND_API_KEY`、`TURNSTILE_SECRET`
+5. **檢查 DNS record**:尤其 MX / DMARC / CAA 有沒有被改
+6. **SEV-1 incident response**(§3.2):72 小時內通報受影響使用者,`sniplet.page/security#advisories` 段落公告
+
+**預防 > 復原**:此節目的是讓 operator 意識到 CF account 本身是 attack surface,不是只有 application code。
+
+---
+
+*最後更新:2026-04-22(v0.8.15)*
