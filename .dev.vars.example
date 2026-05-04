@@ -1,0 +1,9 @@
+# Local dev secrets — copy to .dev.vars (gitignored) and fill in.
+# Production secrets live in CF; push via `wrangler secret put <NAME>`.
+SESSION_JWT_SECRET=
+MAGIC_JWT_SECRET=
+EMAIL_HASH_SECRET=
+IP_HASH_SECRET=
+RESEND_API_KEY=
+TURNSTILE_SECRET=
+TURNSTILE_SITE_KEY=

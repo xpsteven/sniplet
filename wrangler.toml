@@ -1,0 +1,66 @@
+name = "sniplet"
+main = "src/index.ts"
+compatibility_date = "2026-04-22"
+compatibility_flags = ["nodejs_compat"]
+
+# Routes-only deploy — no workers.dev preview URL.
+workers_dev = false
+
+# Embed SKILL.md (and other text assets) into the bundle as raw strings.
+# Used by apex `/` and `/SKILL.md` (PRD §10.2).
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
+# Routes — Worker is hostname-aware; one Worker handles all three families
+# (see src/index.ts dispatch).
+routes = [
+  { pattern = "sniplet.page/*", zone_name = "sniplet.page" },
+  { pattern = "api.sniplet.page/*", zone_name = "sniplet.page" },
+  { pattern = "*.sniplet.page/*", zone_name = "sniplet.page" },
+]
+
+# Cron — daily UTC 02:00 cleanup of expired sniplets (PRD §7.4)
+[triggers]
+crons = ["0 2 * * *"]
+
+# R2 — sniplet HTML + meta.json
+# TODO: enable R2 in dashboard, then this binding works as-is.
+[[r2_buckets]]
+binding = "SNIPLETS"
+bucket_name = "sniplets"
+
+# KV — fill in `id` after running `wrangler kv namespace create <name>`.
+[[kv_namespaces]]
+binding = "METER_KV"
+id = "cadbc85499cb4913a51e98f92a9aabba"
+
+[[kv_namespaces]]
+binding = "EMAIL_INDEX_KV"
+id = "64eb100b7a4b46dfa1db67b91babc1fd"
+
+[[kv_namespaces]]
+binding = "MAGIC_CONSUMED_KV"
+id = "ae2cab59652b45d88510aabe3a445f26"
+
+# Analytics Engine — backend events (PRD §7.18)
+# Temporarily commented out: requires account-level Analytics Engine enable
+# (separate from dataset creation). Worker `track()` is defensive (no-ops when
+# binding is missing). Re-enable after CF dashboard enable + redeploy.
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"
+# dataset = "sniplet_analytics"
+
+# Non-secret env vars
+[vars]
+ENVIRONMENT = "dev"
+
+# Secrets (push via `wrangler secret put`):
+#   SESSION_JWT_SECRET   — session cookie HS256 key (7 day, PRD §7.2)
+#   MAGIC_JWT_SECRET     — magic link HS256 key (15 min)
+#   EMAIL_HASH_SECRET    — HMAC salt for email index + JWT sub
+#   IP_HASH_SECRET       — HMAC salt for IP hashing
+#   RESEND_API_KEY       — Resend API key
+#   TURNSTILE_SECRET     — Cloudflare Turnstile secret
+#   TURNSTILE_SITE_KEY   — Turnstile site key (server-rendered into challenge page)
